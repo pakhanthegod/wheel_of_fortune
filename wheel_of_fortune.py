@@ -1,6 +1,8 @@
 import json
 import logging
-import time, datetime
+import time
+import datetime
+import threading
 
 import database as db
 
@@ -31,108 +33,149 @@ REQUEST_KWARGS = config['REQUEST_KWARGS']
 
 updater = Updater(token=TOKEN, request_kwargs=REQUEST_KWARGS)
 
+lock = threading.Lock()
+
+
+def check_game_status(bot, chat_id, game_data, question_data, session, keyboard_markup):
+    """
+        Checks the game status by update 'database.Game' object:
+        1. If other player doesn't do anything for 900 secs the game will over.
+        2. If 'database.Game.game_turn' equal to user's chat_id it will be user's turn.
+        3. If 'database.Game.winner_id' is Null the game will continue
+    """
+    import database as db
+    time_to_wait_answer = time.time()
+    elapsed_to_wait_answer = 0
+    while True:
+        if elapsed_to_wait_answer > 900:
+            msg = "Other player doesn't answer to the bot for a long time. Game is over."
+            db.Session.remove()
+            return -1
+        if game_data.game_turn == chat_id:
+            current_game_word = game_data.game_word
+            msg = f"Current game word: {current_game_word}\nWhat would you like to say?"
+            bot.send_message(chat_id=chat_id, text=msg, reply_markup=keyboard_markup)
+            db.Session.remove()
+            return 'SECOND'
+        if game_data.winner_id is not None:
+            msg = f"Game is over! Other player has won! Answer was \"{question_data.answer}\""
+            bot.send_message(chat_id=chat_id, text=msg)
+            db.Session.remove()
+            return -1
+        else:
+            session.refresh(game_data)
+            time.sleep(4)
+        elapsed_to_wait_answer = time.time() - time_to_wait_answer
+
+
+def change_player_turn(chat_id, game_data, session):
+    # TODO: realize the function for 3 players, it's for 2 players right now
+    next_player = game_data.game_turn_prev
+    game_data.game_turn_prev = chat_id
+    game_data.game_turn = next_player
+    session.commit()
+
+
+def set_winner(chat_id, game_data, session):
+    game_data.winner_id = chat_id
+    game_data.game_end = datetime.datetime.now()
+    session.commit()
+
+
 @run_async
-def start(bot:telegram.Bot, update:telegram.Update, user_data):
+def start(bot: telegram.Bot, update: telegram.Update, user_data):
     logging.info('Get the /start command')
 
-    session = db.Session()
-
     chat_id = update.message.chat_id
+
+    session = db.Session()
+    player = session.query(db.Player).filter(db.Player.chat_id == chat_id).one_or_none()
 
     msg = 'You are in the queue. Searching are working for 60 sec.'
     bot.send_message(chat_id=chat_id, text=msg)
 
-    player_query = session.query(db.Player).filter(db.Player.chat_id == chat_id)
-    player = player_query.one_or_none()
-
     if player:
         player.player_search = True
+        session.commit()
     else:
         player = db.Player(chat_id=chat_id, player_search=True)
         session.add(player)
-    
-    session.commit()
-    
+        session.commit()
+
     start = time.time()
     elapsed = 0
     while elapsed < 60:
-        result = session.query(db.PlayerGameLink, db.Game, db.Question) \
-                .filter(db.PlayerGameLink.player_id == chat_id) \
-                .filter(db.Game.game_end == None).one_or_none()
+        result = (
+            session.query(db.PlayerGameLink, db.Game, db.Question)
+            .join(db.Game)
+            .join(db.Question)
+            .filter(db.PlayerGameLink.player_id == chat_id)
+            .filter(db.Game.game_end == None).one_or_none()
+        )
         if result:
             player.player_search = False
             session.commit()
-            game_looking, game, question = result
 
-            user_data['game'] = game
-            user_data['question'] = question
-            user_data['players'] = [player_in_game.player_id for player_in_game in session.query(db.PlayerGameLink).filter(db.PlayerGameLink.game_id == game.game_id)]
+            _, game_data, question_data = result
 
-            msg = 'Prepare! The Game is starting now!'
-            bot.send_message(chat_id=chat_id, text=msg)
-            msg = 'Question: ' + question.question + '\nWord: ' + '*' * len(question.answer)
+            msg = 'Question: ' + question_data.question + '\nWord: ' + '*' * len(question_data.answer)
             bot.send_message(chat_id=chat_id, text=msg)
 
             keyboard = [
                 [InlineKeyboardButton(text='Word', callback_data='word')],
                 [InlineKeyboardButton(text='Letter', callback_data='letter')]
             ]
-            
             keyboard_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-            time_to_wait_answer = time.time()
-            elapsed_to_wait_answer = 0
-            while True:
-                if elapsed_to_wait_answer > 900:
-                    msg = "Another player doesn't answer to the bot for a long time. Game is over."
-                    return
-                if game.game_turn == chat_id:
-                    bot.send_message(chat_id=chat_id, text='What would you like to say?', reply_markup=keyboard_markup)
-                    return 'SECOND'
-                else:
-                    session.refresh(game)
-                    time.sleep(5)
-                elapsed_to_wait_answer = time.time() - time_to_wait_answer
+            players = [player.player_id for player in session.query(db.PlayerGameLink).join(db.Game).filter(db.Game.game_id == game_data.game_id)]
+            user_data['players'] = players
+
+            if game_data.game_turn == chat_id:
+                msg = "What would you like to say?"
+                bot.send_message(chat_id=chat_id, text=msg, reply_markup=keyboard_markup)
+                db.Session.remove()
+                return 'SECOND'
+
+            return check_game_status(bot, chat_id, game_data, question_data, session, keyboard_markup)
         elapsed = time.time() - start
     else:
         msg = 'No one is searching a game at the moment. Try it later.'
         player.player_search = False
         session.commit()
 
+    db.Session.remove()
     bot.send_message(chat_id=chat_id, text=msg)
 
+
 @run_async
-def retrieve_answer(bot:telegram.Bot, update:telegram.Update, user_data):
-    logging.info('Retrieving the answer.')
+def retrieve_answer(bot: telegram.Bot, update: telegram.Update, user_data):
+    logging.info('Retrieve the answer.')
+
+    chat_id = update.message.chat_id
+    player_answer = update.message.text.lower()
 
     session = db.Session()
 
-    chat_id = update.message.chat_id
+    # players = user_data['players']
 
-    player_answer = update.message.text
+    _, game_data, question_data = session.query(db.PlayerGameLink, db.Game, db.Question).join(db.Game).join(db.Question).filter(db.PlayerGameLink.player_id == chat_id).filter(db.Game.game_end == None).one_or_none()
 
-    players = user_data['players']
-    question_data = user_data['question']
-    game_data = user_data['game']
-
-    question_data, game_data, _ = session.query(db.Question, db.Game, db.PlayerGameLink).filter(db.PlayerGameLink.player_id == chat_id).filter(db.Game.game_end == None).one_or_none()
-
-    session.refresh(question_data)
-    session.refresh(game_data)
-
-    answer = question_data.answer
-    game_word = game_data.game_word
-
-    bot.send_message(chat_id=chat_id, text=game_word)
+    answer = question_data.answer.lower()
 
     waiting = user_data['waiting']
+
+    keyboard = [
+        [InlineKeyboardButton(text='Word', callback_data='word')],
+        [InlineKeyboardButton(text='Letter', callback_data='letter')]
+    ]
+    keyboard_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     if waiting == 'letter':
         if len(player_answer) != 1:
             msg = 'Please send a one letter.'
         else:
-            if player_answer in answer:
-                msg = "You're right! This letter in the answer!"
+            game_word = game_data.game_word
+            if player_answer in answer and player_answer not in game_word:
                 indexes = [index for index, letter in enumerate(answer) if player_answer == letter]
                 game_word_list = list(game_word)
                 for index in indexes:
@@ -140,76 +183,59 @@ def retrieve_answer(bot:telegram.Bot, update:telegram.Update, user_data):
                 game_word = "".join(game_word_list)
                 game_data.game_word = game_word
                 session.commit()
+
+                if '*' not in game_word:
+                    msg = "You're the winner! Congratulation!"
+                    bot.send_message(chat_id=chat_id, text=msg)
+                    set_winner(chat_id, game_data, session)
+                    return -1
+                
+                msg = f"You're right! This letter in the answer!\nCurrent game word: {game_word}"
+                bot.send_message(chat_id=chat_id, text=msg)
+                bot.send_message(chat_id=chat_id, text='What would you like to say?', reply_markup=keyboard_markup)
+
+                db.Session.remove()
+
+                return 'SECOND'
             else:
                 msg = "You're wrong! There is not this letter in the answer"
-                next_player = game_data.game_turn_prev
-                game_data.game_turn_prev = chat_id
-                game_data.game_turn = next_player
-                session.commit()
+                change_player_turn(chat_id, game_data, session)
     else:
         if player_answer != answer:
             msg = "You're wrong! This isn't answer!"
-            # next_player = [player for player in players if player != game_data.game_turn and player != game_data.game_turn_prev][0]
-            next_player = game_data.game_turn_prev
-            game_data.game_turn_prev = chat_id
-            game_data.game_turn = next_player
-            session.commit()
+            change_player_turn(chat_id, game_data, session)
         else:
             msg = "You're the winner! Congratulation!"
             bot.send_message(chat_id=chat_id, text=msg)
-            game_data.game_end = datetime.datetime.now()
-            session.commit()
-            return
+            set_winner(chat_id, game_data, session)
+            return -1
 
     bot.send_message(chat_id=chat_id, text=msg)
 
-    keyboard = [
-        [InlineKeyboardButton(text='Word', callback_data='word')],
-        [InlineKeyboardButton(text='Letter', callback_data='letter')]
-    ]
-    
-    keyboard_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    time_to_wait_answer = time.time()
-    elapsed_to_wait_answer = 0
-    while True:
-        if elapsed_to_wait_answer > 900:
-            msg = "Another player doesn't answer to the bot for a long time. Game is over."
-            return
-        if game_data.game_turn == chat_id:
-            bot.send_message(chat_id=chat_id, text='What would you like to say?', reply_markup=keyboard_markup)
-            return 'SECOND'
-        else:
-            session.refresh(game_data)
-            time.sleep(5)
-        elapsed_to_wait_answer = time.time() - time_to_wait_answer
-
-    bot.send_message(chat_id=chat_id, text='Choose', reply_markup=keyboard_markup)
-
-    return 'SECOND'
+    return check_game_status(bot, chat_id, game_data, question_data, session, keyboard_markup)
 
 
-def game(bot:telegram.Bot, update:telegram.Update, user_data):
-    logging.info('Game.')
+@run_async
+def game(bot: telegram.Bot, update: telegram.Update, user_data):
+    logging.info('Get the callback from the keyboard.')
 
     query = update.callback_query
     chat_id = query.message.chat_id
 
-    session = db.Session()
-
-    question_data, game_data, _ = session.query(db.Question, db.Game, db.PlayerGameLink).filter(db.PlayerGameLink.player_id == chat_id).filter(db.Game.game_end == None).one_or_none()
-
     user_data['waiting'] = query.data
 
-    msg = f'Current word: {game_data.game_word}\nSend a {query.data.lower()}.'
-
+    msg = f'Send a {query.data.lower()}.'
     bot.send_message(chat_id=chat_id, text=msg)
 
     return 'FIRST'
 
-def status(bot:telegram.Bot, update:telegram.Update):
+
+def status(bot: telegram.Bot, update: telegram.Update):
     logging.info('Print the count of active games')
+
+    session = db.Session()
     count = session.query(db.Game).filter(db.Game.game_end == None).count()
+
     msg = f'{count} games are active at the moment.'
     bot.send_message(chat_id=update.message.chat_id, text=msg)
 
