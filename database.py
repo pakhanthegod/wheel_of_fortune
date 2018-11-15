@@ -42,7 +42,7 @@ class Game(_Base):
     game_turn_prev = Column(Integer, ForeignKey(Player.chat_id))
     game_turn = Column(Integer, ForeignKey(Player.chat_id))
     winner_id = Column(Integer, ForeignKey(Player.chat_id), nullable=True)
-    game_canceled = Column(Boolean, default=False)
+    game_cancelled = Column(Boolean, default=False)
     game_start = Column(DateTime, default=datetime.datetime.now)
     game_end = Column(DateTime, nullable=True)
 
