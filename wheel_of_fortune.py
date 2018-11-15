@@ -58,7 +58,12 @@ def check_game_status(bot, chat_id, game_data, question_data, session, keyboard_
             db.Session.remove()
             return 'SECOND'
         if game_data.winner_id is not None:
-            msg = f"Game is over! Other player has won! Answer was \"{question_data.answer}\""
+            msg = f"The game is over! Other player has won! Answer was \"{question_data.answer}\""
+            bot.send_message(chat_id=chat_id, text=msg)
+            db.Session.remove()
+            return -1
+        if game_data.game_canceled == True:
+            msg = f"The game has been canceled by other player."
             bot.send_message(chat_id=chat_id, text=msg)
             db.Session.remove()
             return -1
@@ -89,7 +94,11 @@ def start(bot: telegram.Bot, update: telegram.Update, user_data):
     chat_id = update.message.chat_id
 
     session = db.Session()
-    player = session.query(db.Player).filter(db.Player.chat_id == chat_id).one_or_none()
+    player = (
+        session.query(db.Player)
+        .filter(db.Player.chat_id == chat_id)
+        .one_or_none()
+    )
 
     msg = 'You are in the queue. Searching are working for 60 sec.'
     bot.send_message(chat_id=chat_id, text=msg)
@@ -158,7 +167,14 @@ def retrieve_answer(bot: telegram.Bot, update: telegram.Update, user_data):
 
     # players = user_data['players']
 
-    _, game_data, question_data = session.query(db.PlayerGameLink, db.Game, db.Question).join(db.Game).join(db.Question).filter(db.PlayerGameLink.player_id == chat_id).filter(db.Game.game_end == None).one_or_none()
+    _, game_data, question_data = (
+        session.query(db.PlayerGameLink, db.Game, db.Question)
+        .join(db.Game)
+        .join(db.Question)
+        .filter(db.PlayerGameLink.player_id == chat_id)
+        .filter(db.Game.game_end == None)
+        .one_or_none()
+    )
 
     answer = question_data.answer.lower()
 
@@ -230,6 +246,32 @@ def game(bot: telegram.Bot, update: telegram.Update, user_data):
     return 'FIRST'
 
 
+@run_async
+def stop(bot: telegram.Bot, update: telegram.Update):
+    logging.info('Get stop command.')
+
+    chat_id = update.message.chat_id
+
+    session = db.Session()
+    _, game_data = (
+        session.query(db.PlayerGameLink, db.Game)
+        .join(db.Game)
+        .filter(db.PlayerGameLink.player_id == chat_id)
+        .filter(db.Game.game_end == None)
+        .one_or_none()
+    )
+    game_data.game_end = datetime.datetime.now()
+    game_data.game_canceled = True
+    
+    session.commit()
+    db.Session.remove()
+
+    msg = 'You have stopped the game.'
+    bot.send_message(chat_id=chat_id, text=msg)
+
+    return -1
+
+
 def status(bot: telegram.Bot, update: telegram.Update):
     logging.info('Print the count of active games')
 
@@ -248,7 +290,7 @@ conversation = ConversationHandler(
         'FIRST': [MessageHandler(Filters.text, retrieve_answer, pass_user_data=True)],
         'SECOND': [CallbackQueryHandler(game, pass_user_data=True)]
     },
-    fallbacks=[CommandHandler('status', status)]
+    fallbacks=[CommandHandler('stop', stop)]
 )
 
 dispatcher.add_handler(conversation)

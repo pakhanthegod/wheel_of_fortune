@@ -42,6 +42,7 @@ class Game(_Base):
     game_turn_prev = Column(Integer, ForeignKey(Player.chat_id))
     game_turn = Column(Integer, ForeignKey(Player.chat_id))
     winner_id = Column(Integer, ForeignKey(Player.chat_id), nullable=True)
+    game_canceled = Column(Boolean, default=False)
     game_start = Column(DateTime, default=datetime.datetime.now)
     game_end = Column(DateTime, nullable=True)
 
@@ -63,3 +64,17 @@ class PlayerGameLink(_Base):
 
 if __name__ == '__main__':
     _Base.metadata.create_all(bind=_engine)
+
+    # I'm populating the question data (Question) by json file which has question:answer
+
+    # session = Session()
+
+    # import json
+    # with open('qa.json') as json_file:
+    #     json_data = json.load(json_file)
+    
+    # for item in json_data:
+    #     question, answer = item.values()
+    #     question_obj = Question(question=question, answer=answer)
+    #     session.add(question_obj)
+    #     session.commit()
