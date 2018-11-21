@@ -33,60 +33,7 @@ REQUEST_KWARGS = config['REQUEST_KWARGS_NONFREE']
 updater = Updater(token=TOKEN, request_kwargs=REQUEST_KWARGS)
 
 
-def check_game_status(bot, chat_id, game_data, question_data, session, keyboard_markup):
-    """
-        Checks the game status by update 'database.Game' object:
-        1. If other player doesn't do anything for 900 secs the game will over.
-        2. If 'database.Game.game_turn' equal to user's chat_id it will be user's turn.
-        3. If 'database.Game.winner_id' is Null the game will continue
-    """
-    import database as db
-    time_to_wait_answer = time.time()
-    elapsed_to_wait_answer = 0
-    while True:
-        if elapsed_to_wait_answer > 900:
-            msg = "Other player doesn't answer to the bot for a long time. Game is over."
-            db.Session.remove()
-            return -1
-        if game_data.game_turn == chat_id:
-            current_game_word = game_data.game_word
-            msg = f"Current game word: {current_game_word}\nWhat would you like to say?"
-            try:
-                bot.send_message(chat_id=chat_id, text=msg, reply_markup=keyboard_markup)
-            except telegram.error.Unauthorized:
-                logging.info('Get telegram.error.Unathorized')
-                game_data.game_cancelled = True
-                session.commit()
-                db.Session.remove()
-                return -1
-            db.Session.remove()
-            return 'SECOND'
-        if game_data.winner_id is not None:
-            msg = f"The game is over! Other player has won! Answer was \"{question_data.answer}\""
-            try:
-                bot.send_message(chat_id=chat_id, text=msg)
-            except telegram.error.Unauthorized:
-                logging.info('Get telegram.error.Unathorized')
-                game_data.game_cancelled = True
-                session.commit()
-            db.Session.remove()
-            return -1
-        if game_data.game_cancelled == True:
-            msg = f"The game has been canceled by other player."
-            try:
-                bot.send_message(chat_id=chat_id, text=msg)
-            except telegram.error.Unauthorized:
-                logging.info('Get telegram.error.Unathorized')
-                game_data.game_cancelled = True
-                session.commit()
-            db.Session.remove()
-            return -1
-        else:
-            session.refresh(game_data)
-            time.sleep(4)
-        elapsed_to_wait_answer = time.time() - time_to_wait_answer
-
-
+@run_async
 def change_player_turn(chat_id, game_data, session):
     # TODO: realize the function for 3 players, it's for 2 players right now
     next_player = game_data.game_turn_prev
@@ -95,6 +42,7 @@ def change_player_turn(chat_id, game_data, session):
     session.commit()
 
 
+@run_async
 def set_winner(chat_id, game_data, session):
     game_data.winner_id = chat_id
     game_data.game_end = datetime.datetime.now()
@@ -177,7 +125,51 @@ def start(bot: telegram.Bot, update: telegram.Update, user_data):
                 db.Session.remove()
                 return 'SECOND'
 
-            return check_game_status(bot, chat_id, game_data, question_data, session, keyboard_markup)
+            time_to_wait_answer = time.time()
+            elapsed_to_wait_answer = 0
+            while True:
+                if elapsed_to_wait_answer > 900:
+                    msg = "Other player doesn't answer to the bot for a long time. Game is over."
+                    db.Session.remove()
+                    return -1
+                if game_data.game_turn == chat_id:
+                    current_game_word = game_data.game_word
+                    msg = f"Current game word: {current_game_word}\nWhat would you like to say?"
+                    try:
+                        bot.send_message(chat_id=chat_id, text=msg, reply_markup=keyboard_markup)
+                        print('q')
+                        db.Session.remove()
+                        return 'SECOND'
+                    except telegram.error.Unauthorized:
+                        logging.info('Get telegram.error.Unathorized')
+                        game_data.game_cancelled = True
+                        session.commit()
+                        db.Session.remove()
+                        return -1
+                if game_data.winner_id is not None:
+                    msg = f"The game is over! Other player has won! Answer was \"{question_data.answer}\""
+                    try:
+                        bot.send_message(chat_id=chat_id, text=msg)
+                    except telegram.error.Unauthorized:
+                        logging.info('Get telegram.error.Unathorized')
+                        game_data.game_cancelled = True
+                        session.commit()
+                    db.Session.remove()
+                    return -1
+                if game_data.game_cancelled == True:
+                    msg = f"The game has been canceled by other player."
+                    try:
+                        bot.send_message(chat_id=chat_id, text=msg)
+                    except telegram.error.Unauthorized:
+                        logging.info('Get telegram.error.Unathorized')
+                        game_data.game_cancelled = True
+                        session.commit()
+                    db.Session.remove()
+                    return -1
+                else:
+                    session.refresh(game_data)
+                    time.sleep(2)
+                elapsed_to_wait_answer = time.time() - time_to_wait_answer
         elapsed = time.time() - start
     else:
         msg = 'No one is searching a game at the moment. Try it later.'
@@ -243,29 +235,27 @@ def retrieve_answer(bot: telegram.Bot, update: telegram.Update, user_data):
                     msg = "You're the winner! Congratulation!"
                     try:
                         bot.send_message(chat_id=chat_id, text=msg)
+                        set_winner(chat_id, game_data, session)
+                        return -1
                     except telegram.error.Unauthorized:
                         logging.info('Get telegram.error.Unathorized')
                         game_data.game_cancelled = True
                         session.commit()
                         db.Session.remove()
                         return -1
-                    set_winner(chat_id, game_data, session)
-                    return -1
                 
                 msg = f"You're right! This letter in the answer!\nCurrent game word: {game_word}"
                 try:
                     bot.send_message(chat_id=chat_id, text=msg)
                     bot.send_message(chat_id=chat_id, text='What would you like to say?', reply_markup=keyboard_markup)
+                    db.Session.remove()
+                    return 'SECOND'
                 except telegram.error.Unauthorized:
                     logging.info('Get telegram.error.Unathorized')
                     game_data.game_cancelled = True
                     session.commit()
                     db.Session.remove()
                     return -1
-
-                db.Session.remove()
-
-                return 'SECOND'
             else:
                 msg = "You're wrong! There is not this letter in the answer"
                 change_player_turn(chat_id, game_data, session)
@@ -277,14 +267,14 @@ def retrieve_answer(bot: telegram.Bot, update: telegram.Update, user_data):
             msg = "You're the winner! Congratulation!"
             try:
                 bot.send_message(chat_id=chat_id, text=msg)
+                set_winner(chat_id, game_data, session)
+                return -1
             except telegram.error.Unauthorized:
                 logging.info('Get telegram.error.Unathorized')
                 game_data.game_cancelled = True
                 session.commit()
                 db.Session.remove()
                 return -1
-            set_winner(chat_id, game_data, session)
-            return -1
 
     try:
         bot.send_message(chat_id=chat_id, text=msg)
@@ -295,7 +285,51 @@ def retrieve_answer(bot: telegram.Bot, update: telegram.Update, user_data):
         db.Session.remove()
         return -1
 
-    return check_game_status(bot, chat_id, game_data, question_data, session, keyboard_markup)
+    time_to_wait_answer = time.time()
+    elapsed_to_wait_answer = 0
+    while True:
+        if elapsed_to_wait_answer > 900:
+            msg = "Other player doesn't answer to the bot for a long time. Game is over."
+            db.Session.remove()
+            return -1
+        if game_data.game_turn == chat_id:
+            current_game_word = game_data.game_word
+            msg = f"Current game word: {current_game_word}\nWhat would you like to say?"
+            try:
+                bot.send_message(chat_id=chat_id, text=msg, reply_markup=keyboard_markup)
+                print('q')
+                db.Session.remove()
+                return 'SECOND'
+            except telegram.error.Unauthorized:
+                logging.info('Get telegram.error.Unathorized')
+                game_data.game_cancelled = True
+                session.commit()
+                db.Session.remove()
+                return -1
+        if game_data.winner_id is not None:
+            msg = f"The game is over! Other player has won! Answer was \"{question_data.answer}\""
+            try:
+                bot.send_message(chat_id=chat_id, text=msg)
+            except telegram.error.Unauthorized:
+                logging.info('Get telegram.error.Unathorized')
+                game_data.game_cancelled = True
+                session.commit()
+            db.Session.remove()
+            return -1
+        if game_data.game_cancelled == True:
+            msg = f"The game has been canceled by other player."
+            try:
+                bot.send_message(chat_id=chat_id, text=msg)
+            except telegram.error.Unauthorized:
+                logging.info('Get telegram.error.Unathorized')
+                game_data.game_cancelled = True
+                session.commit()
+            db.Session.remove()
+            return -1
+        else:
+            session.refresh(game_data)
+            time.sleep(2)
+        elapsed_to_wait_answer = time.time() - time_to_wait_answer
 
 
 @run_async
@@ -347,17 +381,18 @@ def stop(bot: telegram.Bot, update: telegram.Update):
         .filter(db.Game.game_end == None)
         .one_or_none()
     )
-    game_data.game_end = datetime.datetime.now()
-    game_data.game_canceled = True
+    if game_data:
+        game_data.game_end = datetime.datetime.now()
+        game_data.game_cancelled = True
 
-    msg = 'You have stopped the game.'
-    try:
-        bot.send_message(chat_id=chat_id, text=msg)
-    except telegram.error.Unauthorized:
-        logging.info('Get telegram.error.Unathorized')
+        msg = 'You have stopped the game.'
+        try:
+            bot.send_message(chat_id=chat_id, text=msg)
+        except telegram.error.Unauthorized:
+            logging.info('Get telegram.error.Unathorized')
 
-    session.commit()
-    db.Session.remove()
+        session.commit()
+        db.Session.remove()
 
     return -1
 
@@ -366,12 +401,14 @@ def stop(bot: telegram.Bot, update: telegram.Update):
 def status(bot: telegram.Bot, update: telegram.Update):
     logging.info('Print the count of active games')
 
+    chat_id = update.message.chat_id
+
     session = db.Session()
     count = session.query(db.Game).filter(db.Game.game_end == None).count()
 
     msg = f'{count} games are active at the moment.'
     try:
-        bot.send_message(chat_id=update.message.chat_id, text=msg)
+        bot.send_message(chat_id=chat_id, text=msg)
     except telegram.error.Unauthorized:
         logging.info('Get telegram.error.Unathorized')
         return
